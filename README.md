@@ -1,19 +1,24 @@
 # sankaku-explorer
 
-A small Rust CLI that discovers Sankaku post URLs via the JSON API and writes them to a file for downstream tools (e.g., gallery-dl). It **does not download** content and **does not enrich** metadata. It only walks pages, extracts post IDs, and emits post page URLs.
+ A small Rust CLI with two functions:
+ - **discover**: find Sankaku post URLs via the JSON API and write them to a file for downstream tools (e.g., gallery-dl)
+ - **export**: convert Sankaku JSON sidecars into XMP sidecars for photo apps
 
 ## What it does
 
-- Calls the Sankaku keyset listing API (`/v2/posts/keyset`) or any compatible endpoint.
-- Paginates via the `meta.next` cursor until the API ends or you cap pages.
-- Extracts each `data[].id` and writes `https://sankaku.app/posts/<id>` URLs.
-- Optionally saves raw JSON pages for auditing.
+- discover:
+  - Calls the Sankaku keyset listing API (`/v2/posts/keyset`) or any compatible endpoint.
+  - Paginates via the `meta.next` cursor until the API ends or you cap pages.
+  - Extracts each `data[].id` and writes `https://sankaku.app/posts/<id>` URLs.
+  - Optionally saves raw JSON pages for auditing.
+- export:
+  - Reads Sankaku JSON sidecar files.
+  - Writes XMP sidecar files with tags and metadata.
 
 ## What it does NOT do
 
 - No downloading.
 - No gallery-dl invocation.
-- No metadata enrichment beyond saving raw pages (optional).
 
 ## Install / Build
 
@@ -68,12 +73,64 @@ cargo run -- \
 
 This writes URLs to `out/urls.txt` and raw JSON to `out/pages/page_00001.json` etc.
 
+## Export (JSON sidecar -> XMP)
+
+The export subcommand converts Sankaku JSON sidecars into XMP sidecars that photo apps can read.
+
+Directory mode (default):
+
+```bash
+cargo run -- export --dir /path/to/sidecars
+```
+
+Single file:
+
+```bash
+cargo run -- export --file /path/to/sankaku_foo.jpg.json
+```
+
+Outputs:
+
+- For `image.jpg.json` it writes `image.jpg.xmp` next to it
+- If you pass `--out` in single-file mode, it writes to that path instead
+
+## Subcommands
+
+- `discover` (default if no subcommand is given): find URLs via API
+- `export`: convert JSON sidecars to XMP
+
 ## Output
 
-- `out/urls.txt`: one URL per line
-- `out/pages/page_XXXXX.json` (optional): raw API payloads
+- discover:
+  - `out/urls.txt`: one URL per line
+  - `out/pages/page_XXXXX.json` (optional): raw API payloads
+- export:
+  - `*.xmp` files next to each JSON sidecar
 
 ## Flags (complete)
+
+### Export
+
+- `export --dir <DIR>`
+  - **Default:** `.` (current directory)
+  - Directory to scan for sidecar JSON files
+
+- `export --file <PATH>`
+  - Process a single JSON sidecar file
+
+- `export --recursive <true|false>`
+  - **Default:** `true`
+  - Recurse into subdirectories when using `--dir`
+
+- `export --overwrite`
+  - Overwrite existing `.xmp` files
+
+- `export --dry-run`
+  - Do not write any files; log what would happen
+
+- `export --out <PATH>`
+  - Output path for single-file mode
+  - Default: replace trailing `.json` with `.xmp`
 
 ### Core query
 
@@ -183,7 +240,7 @@ This writes URLs to `out/urls.txt` and raw JSON to `out/pages/page_00001.json` e
 - `-v` / `--verbose`
   - Enable debug logs
 
-## Default behavior (no flags)
+## Default behavior (no subcommand)
 
 - Endpoint: `https://sankakuapi.com/v2/posts/keyset`
 - Tags: `order:quality`
@@ -192,6 +249,12 @@ This writes URLs to `out/urls.txt` and raw JSON to `out/pages/page_00001.json` e
 - Max pages: unlimited (until `meta.next` is empty)
 - Output: `out/urls.txt` (overwritten)
 - Auth: reads `~/.config/gallery-dl/config.json` if present
+
+## Default behavior (export)
+
+- Directory: current directory
+- Recursive: true
+- Output: `.xmp` next to each `.json`
 
 ## Notes
 
