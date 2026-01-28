@@ -129,14 +129,13 @@ struct DiscoverArgs {
 
 #[derive(Args, Debug, Clone)]
 #[command(arg_required_else_help = true)]
-#[group(id = "export_input", required = true, multiple = false)]
 struct ExportArgs {
     /// Directory containing Sankaku JSON sidecars
-    #[arg(long, group = "export_input")]
+    #[arg(long, required_unless_present = "file", conflicts_with = "file")]
     dir: Option<PathBuf>,
 
     /// Process a single JSON sidecar file
-    #[arg(long, group = "export_input")]
+    #[arg(long, required_unless_present = "dir", conflicts_with = "dir")]
     file: Option<PathBuf>,
 
     /// Recurse into subdirectories when using --dir
@@ -539,6 +538,16 @@ fn iso8601_from_unix(ts: i64) -> Option<String> {
 fn build_xmp(sc: &SankakuSidecar) -> Result<String> {
     let keywords = tags_from_sidecar(sc);
 
+    let title = sc.id.trim().to_string();
+    let title = if title.is_empty() { None } else { Some(title) };
+
+    let description = sc.tag_string.trim().to_string();
+    let description = if description.is_empty() {
+        None
+    } else {
+        Some(description)
+    };
+
     let creator = sc
         .author
         .name
@@ -608,6 +617,41 @@ fn build_xmp(sc: &SankakuSidecar) -> Result<String> {
     <xmp:Label>{}</xmp:Label>"#, escape_xml(l)))
         .unwrap_or_default();
 
+    let xmp_rating = rating_to_xmp(&sc.rating)
+        .map(|r| format!(r#"
+    <xmp:Rating>{}</xmp:Rating>"#, r))
+        .unwrap_or_default();
+
+    let dc_title = title
+        .as_ref()
+        .map(|t| {
+            format!(
+                r#"
+    <dc:title>
+      <rdf:Alt>
+        <rdf:li xml:lang="x-default">{}</rdf:li>
+      </rdf:Alt>
+    </dc:title>"#,
+                escape_xml(t)
+            )
+        })
+        .unwrap_or_default();
+
+    let dc_description = description
+        .as_ref()
+        .map(|d| {
+            format!(
+                r#"
+    <dc:description>
+      <rdf:Alt>
+        <rdf:li xml:lang="x-default">{}</rdf:li>
+      </rdf:Alt>
+    </dc:description>"#,
+                escape_xml(d)
+            )
+        })
+        .unwrap_or_default();
+
     let subject = format!(
         r#"
     <dc:subject>
@@ -621,23 +665,39 @@ fn build_xmp(sc: &SankakuSidecar) -> Result<String> {
     let xmp = format!(
         r#"<?xml version="1.0" encoding="utf-8"?>
 <x:xmpmeta xmlns:x="adobe:ns:meta/">
-  <rdf:RDF xmlns:rdf="<http://www.w3.org/1999/02/22-rdf-syntax-ns#>">
+  <rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#">
     <rdf:Description
       rdf:about=""
-      xmlns:dc="<http://purl.org/dc/elements/1.1/>"
-      xmlns:xmp="<http://ns.adobe.com/xap/1.0/>">{dc_creator}{dc_source}{subject}{xmp_createdate}{xmp_label}
+      xmlns:dc="http://purl.org/dc/elements/1.1/"
+      xmlns:xmp="http://ns.adobe.com/xap/1.0/">{dc_title}{dc_description}{dc_creator}{dc_source}{subject}{xmp_createdate}{xmp_label}{xmp_rating}
     </rdf:Description>
   </rdf:RDF>
 </x:xmpmeta>
 "#,
+        dc_title = dc_title,
+        dc_description = dc_description,
         dc_creator = dc_creator,
         dc_source = dc_source,
         subject = subject,
         xmp_createdate = xmp_createdate,
-        xmp_label = xmp_label
+        xmp_label = xmp_label,
+        xmp_rating = xmp_rating
     );
 
     Ok(xmp)
+}
+
+fn rating_to_xmp(rating: &str) -> Option<i32> {
+    let r = rating.trim().to_ascii_lowercase();
+    if r.is_empty() {
+        return None;
+    }
+    match r.as_str() {
+        "s" | "safe" | "g" => Some(1),
+        "q" | "questionable" | "r15" => Some(3),
+        "e" | "explicit" | "r18" => Some(5),
+        _ => None,
+    }
 }
 
 fn write_atomic(out_path: &Path, data: &str) -> Result<()> {
