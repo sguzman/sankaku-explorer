@@ -128,13 +128,15 @@ struct DiscoverArgs {
 }
 
 #[derive(Args, Debug, Clone)]
+#[command(arg_required_else_help = true)]
+#[group(id = "export_input", required = true, multiple = false)]
 struct ExportArgs {
     /// Directory containing Sankaku JSON sidecars
-    #[arg(long, default_value = ".")]
-    dir: PathBuf,
+    #[arg(long, group = "export_input")]
+    dir: Option<PathBuf>,
 
     /// Process a single JSON sidecar file
-    #[arg(long)]
+    #[arg(long, group = "export_input")]
     file: Option<PathBuf>,
 
     /// Recurse into subdirectories when using --dir
@@ -178,28 +180,20 @@ struct Credentials {
 
 #[derive(Deserialize, Debug)]
 struct SankakuAuthor {
-    name: Option<String>,
-}
-
-#[derive(Deserialize, Debug)]
-#[serde(untagged)]
-enum TagValue {
-    Str(String),
-    Obj { name: Option<String> },
+    name: String,
 }
 
 #[derive(Deserialize, Debug)]
 struct SankakuSidecar {
-    id: Option<String>,
-    md5: Option<String>,
-    rating: Option<String>,
-    date: Option<String>,
-    created_at: Option<i64>,
-    file_url: Option<String>,
-    author: Option<SankakuAuthor>,
-    tags: Option<Vec<TagValue>>,
-    tag_names: Option<Vec<String>>,
-    tag_string: Option<String>,
+    id: String,
+    md5: String,
+    rating: String,
+    date: String,
+    created_at: i64,
+    file_url: String,
+    author: SankakuAuthor,
+    tags: Vec<String>,
+    tag_string: String,
 }
 
 fn normalize_rating(raw: &str) -> String {
@@ -459,7 +453,9 @@ fn json_to_xmp_path(json_path: &Path) -> Result<PathBuf> {
 }
 
 fn is_json_sidecar(path: &Path) -> bool {
-    path.extension().and_then(|e| e.to_str()) == Some("json")
+    let is_json = path.extension().and_then(|e| e.to_str()) == Some("json");
+    let file_name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+    is_json && file_name.starts_with("sankaku_")
 }
 
 fn collect_json_files(dir: &Path, recursive: bool, out: &mut Vec<PathBuf>) -> Result<()> {
@@ -480,42 +476,44 @@ fn collect_json_files(dir: &Path, recursive: bool, out: &mut Vec<PathBuf>) -> Re
 }
 
 fn tags_from_sidecar(sc: &SankakuSidecar) -> Vec<String> {
-    let mut out: Vec<String> = Vec::new();
-
-    if let Some(tags) = sc.tags.as_ref() {
-        for t in tags {
-            match t {
-                TagValue::Str(s) => out.push(s.clone()),
-                TagValue::Obj { name } => {
-                    if let Some(n) = name {
-                        out.push(n.clone());
-                    }
-                }
-            }
-        }
-    }
-
-    if out.is_empty() {
-        if let Some(tags) = sc.tag_names.as_ref() {
-            out.extend(tags.iter().cloned());
-        }
-    }
-
-    if out.is_empty() {
-        if let Some(tag_string) = sc.tag_string.as_ref() {
-            for part in tag_string.split_whitespace() {
-                out.push(part.to_string());
-            }
-        }
-    }
-
-    let mut seen = HashSet::new();
-    out.retain(|t| {
+    let mut out = Vec::new();
+    for t in &sc.tags {
         let t = t.trim();
-        !t.is_empty() && seen.insert(t.to_string())
-    });
-
+        if !t.is_empty() {
+            out.push(t.to_string());
+        }
+    }
+    let mut seen = HashSet::new();
+    out.retain(|t| seen.insert(t.clone()));
     out
+}
+
+fn validate_sidecar(sc: &SankakuSidecar) -> Result<()> {
+    if sc.id.trim().is_empty() {
+        return Err(anyhow!("missing id"));
+    }
+    if sc.md5.trim().is_empty() {
+        return Err(anyhow!("missing md5"));
+    }
+    if sc.rating.trim().is_empty() {
+        return Err(anyhow!("missing rating"));
+    }
+    if sc.date.trim().is_empty() {
+        return Err(anyhow!("missing date"));
+    }
+    if sc.file_url.trim().is_empty() {
+        return Err(anyhow!("missing file_url"));
+    }
+    if sc.author.name.trim().is_empty() {
+        return Err(anyhow!("missing author.name"));
+    }
+    if sc.tags.is_empty() {
+        return Err(anyhow!("missing tags"));
+    }
+    if sc.tag_string.trim().is_empty() {
+        return Err(anyhow!("missing tag_string"));
+    }
+    Ok(())
 }
 
 fn iso8601_from_date_field(s: &str) -> Option<String> {
@@ -543,31 +541,25 @@ fn build_xmp(sc: &SankakuSidecar) -> Result<String> {
 
     let creator = sc
         .author
-        .as_ref()
-        .and_then(|a| a.name.as_ref())
-        .map(|s| s.trim())
-        .filter(|s| !s.is_empty())
-        .map(|s| s.to_string());
+        .name
+        .trim()
+        .to_string();
+    let creator = if creator.is_empty() { None } else { Some(creator) };
 
-    let create_date = sc
-        .date
-        .as_ref()
-        .and_then(|d| iso8601_from_date_field(d))
-        .or_else(|| sc.created_at.and_then(iso8601_from_unix));
+    let create_date = iso8601_from_date_field(&sc.date)
+        .or_else(|| iso8601_from_unix(sc.created_at));
 
-    let source = sc
-        .file_url
-        .as_ref()
-        .map(|s| s.trim())
-        .filter(|s| !s.is_empty())
-        .map(|s| s.to_string());
+    let source = sc.file_url.trim().to_string();
+    let source = if source.is_empty() { None } else { Some(source) };
 
     let label = {
         let mut bits: Vec<String> = Vec::new();
-        if let Some(id) = sc.id.as_ref().map(|s| s.trim()).filter(|s| !s.is_empty()) {
+        if !sc.id.trim().is_empty() {
+            let id = sc.id.trim();
             bits.push(id.to_string());
         }
-        if let Some(md5) = sc.md5.as_ref().map(|s| s.trim()).filter(|s| !s.is_empty()) {
+        if !sc.md5.trim().is_empty() {
+            let md5 = sc.md5.trim();
             bits.push(md5.to_string());
         }
         if bits.is_empty() {
@@ -679,6 +671,8 @@ fn process_sidecar_file(path: &Path, out_override: Option<&Path>, overwrite: boo
     let bytes = fs::read(path).with_context(|| format!("read {}", path.display()))?;
     let sidecar: SankakuSidecar = serde_json::from_slice(&bytes)
         .with_context(|| format!("parse json {}", path.display()))?;
+    validate_sidecar(&sidecar)
+        .with_context(|| format!("invalid sidecar structure: {}", path.display()))?;
 
     let xmp = build_xmp(&sidecar).with_context(|| format!("build xmp {}", path.display()))?;
 
@@ -692,9 +686,9 @@ fn process_sidecar_file(path: &Path, out_override: Option<&Path>, overwrite: boo
     info!(
         json = %path.display(),
         xmp = %out_path.display(),
-        id = sidecar.id.as_deref().unwrap_or(""),
-        md5 = sidecar.md5.as_deref().unwrap_or(""),
-        rating = sidecar.rating.as_deref().unwrap_or(""),
+        id = sidecar.id.as_str(),
+        md5 = sidecar.md5.as_str(),
+        rating = sidecar.rating.as_str(),
         tags = tags_from_sidecar(&sidecar).len(),
         "wrote xmp"
     );
@@ -713,8 +707,10 @@ fn run_export(args: ExportArgs) -> Result<()> {
 
     let dir = args
         .dir
+        .as_ref()
+        .ok_or_else(|| anyhow!("missing --dir or --file"))?
         .canonicalize()
-        .with_context(|| format!("dir not found: {}", args.dir.display()))?;
+        .with_context(|| format!("dir not found: {}", args.dir.as_ref().unwrap().display()))?;
 
     info!(
         dir = %dir.display(),

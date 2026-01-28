@@ -77,7 +77,9 @@ This writes URLs to `out/urls.txt` and raw JSON to `out/pages/page_00001.json` e
 
 The export subcommand converts Sankaku JSON sidecars into XMP sidecars that photo apps can read.
 
-Directory mode (default):
+Only files named `sankaku_*.json` are considered, and the JSON must match the Sankaku sidecar schema (id, md5, rating, date, created_at, file_url, author.name, tags[], tag_string). Non-matching files are skipped with an error.
+
+Directory mode:
 
 ```bash
 cargo run -- export --dir /path/to/sidecars
@@ -112,7 +114,6 @@ Outputs:
 ### Export
 
 - `export --dir <DIR>`
-  - **Default:** `.` (current directory)
   - Directory to scan for sidecar JSON files
 
 - `export --file <PATH>`
@@ -252,9 +253,8 @@ Outputs:
 
 ## Default behavior (export)
 
-- Directory: current directory
-- Recursive: true
-- Output: `.xmp` next to each `.json`
+- `export` requires `--dir` or `--file`
+- If omitted, it prints help and does nothing
 
 ## Notes
 
