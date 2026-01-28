@@ -1,6 +1,5 @@
 use anyhow::{anyhow, Context, Result};
 use clap::Parser;
-use log::{debug, info, warn};
 use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
 use reqwest::Url;
 use serde::Deserialize;
@@ -9,6 +8,7 @@ use std::fs::{self, OpenOptions};
 use std::io::{BufWriter, Write};
 use std::path::{Path, PathBuf};
 use tokio::time::{sleep, Duration};
+use tracing::{debug, info, warn};
 
 #[derive(Parser, Debug)]
 #[command(author, version, about = "Discover Sankaku post URLs via the JSON API")]
@@ -363,13 +363,10 @@ async fn fetch_page(
 async fn main() -> Result<()> {
     let args = Args::parse();
 
-    let mut log_builder = env_logger::Builder::from_default_env();
-    log_builder.filter_level(if args.verbose {
-        log::LevelFilter::Debug
-    } else {
-        log::LevelFilter::Info
-    });
-    log_builder.init();
+    let level = if args.verbose { "debug" } else { "info" };
+    let env_filter = tracing_subscriber::EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new(level));
+    tracing_subscriber::fmt().with_env_filter(env_filter).init();
 
     ensure_dirs(&args.out, args.save_pages)?;
 
