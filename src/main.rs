@@ -535,6 +535,11 @@ fn iso8601_from_unix(ts: i64) -> Option<String> {
     dt.format(&Rfc3339).ok()
 }
 
+fn now_rfc3339_utc() -> String {
+    let dt = OffsetDateTime::now_utc();
+    dt.format(&Rfc3339).unwrap_or_else(|_| dt.to_string())
+}
+
 fn build_xmp(sc: &SankakuSidecar) -> Result<String> {
     let keywords = tags_from_sidecar(sc);
 
@@ -578,6 +583,20 @@ fn build_xmp(sc: &SankakuSidecar) -> Result<String> {
         }
     };
 
+    let identifier = if sc.id.trim().is_empty() {
+        None
+    } else {
+        Some(sc.id.trim().to_string())
+    };
+
+    let md5 = if sc.md5.trim().is_empty() {
+        None
+    } else {
+        Some(sc.md5.trim().to_string())
+    };
+
+    let metadata_date = now_rfc3339_utc();
+
     let kw_items = keywords
         .iter()
         .map(|k| format!("          <rdf:li>{}</rdf:li>", escape_xml(k)))
@@ -617,6 +636,9 @@ fn build_xmp(sc: &SankakuSidecar) -> Result<String> {
     <xmp:Label>{}</xmp:Label>"#, escape_xml(l)))
         .unwrap_or_default();
 
+    let xmp_metadata_date = format!(r#"
+    <xmp:MetadataDate>{}</xmp:MetadataDate>"#, escape_xml(&metadata_date));
+
     let xmp_rating = rating_to_xmp(&sc.rating)
         .map(|r| format!(r#"
     <xmp:Rating>{}</xmp:Rating>"#, r))
@@ -652,6 +674,18 @@ fn build_xmp(sc: &SankakuSidecar) -> Result<String> {
         })
         .unwrap_or_default();
 
+    let dc_identifier = identifier
+        .as_ref()
+        .map(|i| format!(r#"
+    <dc:identifier>{}</dc:identifier>"#, escape_xml(i)))
+        .unwrap_or_default();
+
+    let sankaku_md5 = md5
+        .as_ref()
+        .map(|m| format!(r#"
+    <sankaku:md5>{}</sankaku:md5>"#, escape_xml(m)))
+        .unwrap_or_default();
+
     let subject = format!(
         r#"
     <dc:subject>
@@ -669,7 +703,8 @@ fn build_xmp(sc: &SankakuSidecar) -> Result<String> {
     <rdf:Description
       rdf:about=""
       xmlns:dc="http://purl.org/dc/elements/1.1/"
-      xmlns:xmp="http://ns.adobe.com/xap/1.0/">{dc_title}{dc_description}{dc_creator}{dc_source}{subject}{xmp_createdate}{xmp_label}{xmp_rating}
+      xmlns:xmp="http://ns.adobe.com/xap/1.0/"
+      xmlns:sankaku="https://sankaku.app/ns/1.0/">{dc_title}{dc_description}{dc_creator}{dc_source}{dc_identifier}{subject}{xmp_createdate}{xmp_metadata_date}{xmp_label}{xmp_rating}{sankaku_md5}
     </rdf:Description>
   </rdf:RDF>
 </x:xmpmeta>
@@ -678,10 +713,13 @@ fn build_xmp(sc: &SankakuSidecar) -> Result<String> {
         dc_description = dc_description,
         dc_creator = dc_creator,
         dc_source = dc_source,
+        dc_identifier = dc_identifier,
         subject = subject,
         xmp_createdate = xmp_createdate,
+        xmp_metadata_date = xmp_metadata_date,
         xmp_label = xmp_label,
-        xmp_rating = xmp_rating
+        xmp_rating = xmp_rating,
+        sankaku_md5 = sankaku_md5
     );
 
     Ok(xmp)
