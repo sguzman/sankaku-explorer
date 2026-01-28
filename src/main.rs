@@ -1,5 +1,6 @@
 use anyhow::{anyhow, Context, Result};
 use clap::Parser;
+use log::{debug, info, warn};
 use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
 use reqwest::Url;
 use serde::Deserialize;
@@ -103,6 +104,10 @@ struct Args {
     /// Extra query param(s), e.g. --param 'page=2'
     #[arg(long = "param", action = clap::ArgAction::Append)]
     params: Vec<String>,
+
+    /// Enable debug logging
+    #[arg(long, short = 'v')]
+    verbose: bool,
 }
 
 #[derive(Deserialize, Debug)]
@@ -358,6 +363,14 @@ async fn fetch_page(
 async fn main() -> Result<()> {
     let args = Args::parse();
 
+    let mut log_builder = env_logger::Builder::from_default_env();
+    log_builder.filter_level(if args.verbose {
+        log::LevelFilter::Debug
+    } else {
+        log::LevelFilter::Info
+    });
+    log_builder.init();
+
     ensure_dirs(&args.out, args.save_pages)?;
 
     let tags_param = build_tags_param(&args)?;
@@ -376,6 +389,7 @@ async fn main() -> Result<()> {
 
     let creds = if bearer.is_none() && !args.no_config {
         let cfg_path = expand_tilde(&args.gallery_dl_config)?;
+        info!("loading gallery-dl config from {}", cfg_path.display());
         Some(load_gallerydl_credentials(&cfg_path)?)
     } else {
         None
@@ -384,8 +398,12 @@ async fn main() -> Result<()> {
     let mut token = bearer;
     if token.is_none() {
         if let Some(c) = creds.as_ref() {
+            info!("authenticating as {}", c.username);
             token = Some(authenticate(&client, &root, &c.username, &c.password).await?);
         }
+    }
+    if token.is_none() {
+        warn!("no bearer token available; requests may be unauthorized");
     }
 
     let urls_path = args.out.join(&args.urls_file);
@@ -403,6 +421,25 @@ async fn main() -> Result<()> {
     let mut prev_next: Option<String> = None;
 
     let mut page: u32 = 0;
+
+    info!("endpoint: {}", args.endpoint);
+    info!("post base: {}", args.post_base);
+    info!("tags: {}", tags_param);
+    info!("limit: {}", args.limit);
+    info!("sleep: {}s", args.sleep_secs);
+    info!("save pages: {}", args.save_pages);
+    info!("urls file: {}", urls_path.display());
+    if args.max_pages == 0 {
+        info!("max pages: unlimited");
+    } else {
+        info!("max pages: {}", args.max_pages);
+    }
+    if let Some(n) = &next {
+        info!("start cursor: {}", n);
+    }
+    if tags_param.is_empty() {
+        warn!("tags parameter is empty; query may be very large or slow");
+    }
 
     loop {
         if args.max_pages > 0 && page >= args.max_pages {
@@ -430,8 +467,10 @@ async fn main() -> Result<()> {
             params.push((k, v));
         }
 
+        debug!("page {} params: {:?}", page, params);
         let text = fetch_page(&client, &args.endpoint, &params, &mut token, creds.as_ref(), &root)
             .await?;
+        debug!("page {} response bytes: {}", page, text.len());
 
         if args.save_pages {
             let page_path = args
@@ -443,8 +482,10 @@ async fn main() -> Result<()> {
         }
 
         let parsed: Resp = serde_json::from_str(&text).context("parse JSON response")?;
+        info!("page {} posts: {}", page, parsed.data.len());
 
         if parsed.data.is_empty() {
+            info!("page {} returned 0 posts; stopping", page);
             break;
         }
 
@@ -456,23 +497,28 @@ async fn main() -> Result<()> {
                 }
                 url.push_str(&post.id);
                 writeln!(writer, "{}", url)?;
+                debug!("emit {}", post.id);
             }
         }
 
         next = parsed.meta.next;
         if next.is_none() {
+            info!("no next cursor; stopping");
             break;
         }
+        debug!("next cursor: {}", next.as_deref().unwrap_or(""));
         if next == prev_next {
             return Err(anyhow!("pagination cursor repeated; stopping to avoid loop"));
         }
         prev_next = next.clone();
 
         if args.sleep_secs > 0.0 {
+            debug!("sleep {}s", args.sleep_secs);
             sleep(Duration::from_secs_f64(args.sleep_secs)).await;
         }
     }
 
     writer.flush()?;
+    info!("done: wrote {} unique urls to {}", seen.len(), urls_path.display());
     Ok(())
 }
