@@ -1,6 +1,7 @@
 use anyhow::{anyhow, Context, Result};
 use clap::Parser;
 use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
+use reqwest::Url;
 use serde::Deserialize;
 use std::collections::HashSet;
 use std::fs::{self, OpenOptions};
@@ -87,6 +88,14 @@ struct Args {
     #[arg(long)]
     bearer: Option<String>,
 
+    /// Read Sankaku credentials from gallery-dl config (default path)
+    #[arg(long, default_value = "~/.config/gallery-dl/config.json")]
+    gallery_dl_config: String,
+
+    /// Do not read gallery-dl config for credentials
+    #[arg(long)]
+    no_config: bool,
+
     /// Extra header(s), e.g. --header 'Api-Version: 2'
     #[arg(long = "header", action = clap::ArgAction::Append)]
     headers: Vec<String>,
@@ -110,6 +119,12 @@ struct Meta {
 #[derive(Deserialize, Debug)]
 struct Post {
     id: String,
+}
+
+#[derive(Debug)]
+struct Credentials {
+    username: String,
+    password: String,
 }
 
 fn normalize_rating(raw: &str) -> String {
@@ -172,7 +187,7 @@ fn ensure_dirs(out: &Path, save_pages: bool) -> Result<()> {
     Ok(())
 }
 
-fn parse_headers(extra: &[String], bearer: Option<String>) -> Result<HeaderMap> {
+fn parse_headers(extra: &[String]) -> Result<HeaderMap> {
     let mut headers = HeaderMap::new();
     headers.insert(
         HeaderName::from_static("accept"),
@@ -215,14 +230,6 @@ fn parse_headers(extra: &[String], bearer: Option<String>) -> Result<HeaderMap> 
         HeaderValue::from_static("https://sankaku.app/"),
     );
 
-    if let Some(tok) = bearer.or_else(|| std::env::var("SANKAKU_TOKEN").ok()) {
-        let v = format!("Bearer {}", tok);
-        headers.insert(
-            HeaderName::from_static("authorization"),
-            HeaderValue::from_str(&v)?,
-        );
-    }
-
     for h in extra {
         let (k, v) = split_kv(h).with_context(|| format!("bad header: {h}"))?;
         headers.insert(HeaderName::from_bytes(k.as_bytes())?, HeaderValue::from_str(&v)?);
@@ -241,6 +248,112 @@ fn split_kv(s: &str) -> Result<(String, String)> {
     Err(anyhow!("expected key:value or key=value"))
 }
 
+fn expand_tilde(path: &str) -> Result<PathBuf> {
+    if let Some(stripped) = path.strip_prefix("~/") {
+        let home = std::env::var("HOME").context("HOME not set for ~ expansion")?;
+        return Ok(PathBuf::from(home).join(stripped));
+    }
+    if path == "~" {
+        let home = std::env::var("HOME").context("HOME not set for ~ expansion")?;
+        return Ok(PathBuf::from(home));
+    }
+    Ok(PathBuf::from(path))
+}
+
+fn load_gallerydl_credentials(path: &Path) -> Result<Credentials> {
+    let text = fs::read_to_string(path)
+        .with_context(|| format!("read gallery-dl config {}", path.display()))?;
+    let value: serde_json::Value = serde_json::from_str(&text)
+        .with_context(|| format!("parse gallery-dl config {}", path.display()))?;
+
+    let username = value
+        .get("extractor")
+        .and_then(|v| v.get("sankaku"))
+        .and_then(|v| v.get("username"))
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+    let password = value
+        .get("extractor")
+        .and_then(|v| v.get("sankaku"))
+        .and_then(|v| v.get("password"))
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+
+    match (username, password) {
+        (Some(u), Some(p)) if !u.is_empty() && !p.is_empty() => Ok(Credentials {
+            username: u,
+            password: p,
+        }),
+        _ => Err(anyhow!(
+            "missing extractor.sankaku.username/password in {}",
+            path.display()
+        )),
+    }
+}
+
+fn endpoint_root(endpoint: &str) -> Result<String> {
+    let url = Url::parse(endpoint).context("parse endpoint URL")?;
+    let scheme = url.scheme();
+    let host = url.host_str().context("endpoint has no host")?;
+    Ok(format!("{}://{}", scheme, host))
+}
+
+async fn authenticate(
+    client: &reqwest::Client,
+    root: &str,
+    username: &str,
+    password: &str,
+) -> Result<String> {
+    let url = format!("{}/auth/token", root);
+    let resp = client
+        .post(url)
+        .json(&serde_json::json!({ "login": username, "password": password }))
+        .send()
+        .await?;
+
+    let status = resp.status();
+    let data: serde_json::Value = resp.json().await?;
+    let success = data.get("success").and_then(|v| v.as_bool()).unwrap_or(true);
+    if status.is_success() && success {
+        if let Some(token) = data.get("access_token").and_then(|v| v.as_str()) {
+            return Ok(token.to_string());
+        }
+    }
+    let err = data
+        .get("error")
+        .and_then(|v| v.as_str())
+        .unwrap_or("authentication failed");
+    Err(anyhow!(err.to_string()))
+}
+
+async fn fetch_page(
+    client: &reqwest::Client,
+    endpoint: &str,
+    params: &[(String, String)],
+    token: &mut Option<String>,
+    creds: Option<&Credentials>,
+    root: &str,
+) -> Result<String> {
+    let mut attempt = 0;
+    loop {
+        let mut req = client.get(endpoint).query(params);
+        if let Some(tok) = token {
+            req = req.bearer_auth(tok);
+        }
+        let resp = req.send().await?;
+        let status = resp.status();
+        if (status.as_u16() == 401 || status.as_u16() == 403) && creds.is_some() && attempt == 0 {
+            if let Some(c) = creds {
+                let new_token = authenticate(client, root, &c.username, &c.password).await?;
+                *token = Some(new_token);
+                attempt += 1;
+                continue;
+            }
+        }
+        return Ok(resp.error_for_status()?.text().await?);
+    }
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     let args = Args::parse();
@@ -249,11 +362,31 @@ async fn main() -> Result<()> {
 
     let tags_param = build_tags_param(&args)?;
 
-    let headers = parse_headers(&args.headers, args.bearer.clone())?;
+    let headers = parse_headers(&args.headers)?;
     let client = reqwest::Client::builder()
         .default_headers(headers)
         .build()?
         .clone();
+
+    let root = endpoint_root(&args.endpoint)?;
+
+    let bearer = args
+        .bearer
+        .or_else(|| std::env::var("SANKAKU_TOKEN").ok());
+
+    let creds = if bearer.is_none() && !args.no_config {
+        let cfg_path = expand_tilde(&args.gallery_dl_config)?;
+        Some(load_gallerydl_credentials(&cfg_path)?)
+    } else {
+        None
+    };
+
+    let mut token = bearer;
+    if token.is_none() {
+        if let Some(c) = creds.as_ref() {
+            token = Some(authenticate(&client, &root, &c.username, &c.password).await?);
+        }
+    }
 
     let urls_path = args.out.join(&args.urls_file);
     let file = OpenOptions::new()
@@ -297,14 +430,8 @@ async fn main() -> Result<()> {
             params.push((k, v));
         }
 
-        let resp = client
-            .get(&args.endpoint)
-            .query(&params)
-            .send()
-            .await?
-            .error_for_status()?;
-
-        let text = resp.text().await?;
+        let text = fetch_page(&client, &args.endpoint, &params, &mut token, creds.as_ref(), &root)
+            .await?;
 
         if args.save_pages {
             let page_path = args
