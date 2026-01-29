@@ -482,6 +482,9 @@ fn tags_from_sidecar(sc: &SankakuSidecar) -> Vec<String> {
             out.push(t.to_string());
         }
     }
+    if let Some(rating_kw) = rating_to_keyword(&sc.rating) {
+        out.push(rating_kw);
+    }
     let mut seen = HashSet::new();
     out.retain(|t| seen.insert(t.clone()));
     out
@@ -736,6 +739,20 @@ fn rating_to_xmp(rating: &str) -> Option<i32> {
         "e" | "explicit" | "r18" => Some(5),
         _ => None,
     }
+}
+
+fn rating_to_keyword(rating: &str) -> Option<String> {
+    let r = rating.trim().to_ascii_lowercase();
+    if r.is_empty() {
+        return None;
+    }
+    let label = match r.as_str() {
+        "s" | "safe" | "g" => "g",
+        "q" | "questionable" | "r15" => "r15",
+        "e" | "explicit" | "r18" => "r18",
+        _ => return None,
+    };
+    Some(format!("rating:{label}"))
 }
 
 fn write_atomic(out_path: &Path, data: &str) -> Result<()> {
